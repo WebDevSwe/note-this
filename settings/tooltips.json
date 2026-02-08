@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "buttons": {
+    "main.new_note": "Skapa en ny anteckning från vald mall. Osparade ändringar sparas automatiskt först.",
+    "main.manage_notes": "Öppna listan med sparade anteckningar för att öppna eller radera.",
+    "main.save_as": "Spara en kopia av anteckningen som en ny fil med nytt filnamn.",
+    "main.search": "Sök i texten. Träffar markeras i dokumentet och antal visas i statusraden.",
+    "main.save": "Spara aktuella ändringar i det öppna dokumentet.",
+    "main.timestamp": "Infoga aktuellt datum och tid vid markören.",
+    "main.zoom": "Växla textstorlek i appen: 100 %, 150 % och 200 %.",
+    "main.about": "Visa information om appen i ett separat fönster.",
+    "template.create": "Skapa en ny anteckning utifrån vald mall.",
+    "template.close": "Stäng mallfönstret utan att skapa en ny anteckning.",
+    "notes.open": "Öppna den markerade anteckningen i editorn.",
+    "notes.delete": "Radera den markerade anteckningen permanent.",
+    "notes.close": "Stäng anteckningslistan.",
+    "about.close": "Stäng informationsfönstret."
+  }
+}
