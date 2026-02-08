@@ -1,20 +1,20 @@
 # NoteThis
 
-En enkel anteckningsapp i Python (Tkinter) med fokus pa snabb textinmatning, mallar och trygg sparning.
+En enkel anteckningsapp i Python (Tkinter) med fokus på snabb textinmatning, mallar och trygg sparning.
 
 ## Funktioner
 
-- Skapa ny anteckning fran mall (`templates/`)
-- Oppna och radera sparade anteckningar (`notes/`)
+- Skapa ny anteckning från mall (`templates/`)
+- Öppna och radera sparade anteckningar (`notes/`)
 - Spara och "Spara som.."
 - Autosparning var 5:e minut med `.bak`-backup
-- Sokfalt med markering av traffar i texten
-- Enkel Markdown-stod for rubriker (`#`, `##`, `###`, `####`)
+- Sökfalt med markering av träffar i texten
+- Enkel Markdown-stöd for rubriker (`#`, `##`, `###`, `####`)
 - Smart Enter-hantering for listor:
-  - `- [ ]` fortsatter som ny checkbox-rad
-  - `1.` fortsatter som numrerad lista
-  - `-` fortsatter som punktlista
-- Infoga tidsstampel (knapp: `🕒`)
+  - `- [ ]` fortsätter som ny checkbox-rad
+  - `1.` fortsätter som numrerad lista
+  - `-` fortsätter som punktlista
+- Infoga tidsstämpel (knapp: `🕒`)
 - Zoomlage: 100%, 150%, 200% (knapp: `+`)
 - Dark mode / light mode (knapp: `🌙` / `☀`)
 - About-dialog med innehall fran `settings/about_notethis.md`
@@ -22,9 +22,9 @@ En enkel anteckningsapp i Python (Tkinter) med fokus pa snabb textinmatning, mal
 ## Krav
 
 - Python 3.10+ rekommenderas
-- Tkinter (brukar inga i vanlig Python-installation pa Windows)
+- Tkinter (brukar ingå i vanlig Python-installation på Windows)
 
-## Kom igang
+## Kom igång
 
 1. Gå till projektmappen.
 2. Starta appen:
@@ -37,7 +37,7 @@ python NoteThis.py
 
 - `NoteThis.py`: huvudapp
 - `settings/tokens.json`: token-konfiguration
-- `settings/tooltips.json`: tooltips pa knappar/falt
+- `settings/tooltips.json`: tooltips påknappar/fält
 - `settings/about_notethis.md`: texten i Om-rutan
 - `templates/`: mallar for nya anteckningar
 - `notes/`: sparade anteckningar
