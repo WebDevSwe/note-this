@@ -80,10 +80,10 @@ I appen finns aven en mall for detta:
 
 - `templates/05_Att-gora funktioner.md`
 
-Da kan du snabbt skapa en ny TODO-anteckning direkt via "Ny anteckning".
+Då kan du snabbt skapa en ny TODO-anteckning direkt via "Ny anteckning".
 
-## Felsokning
+## Felsökning
 
 - Om appen inte startar: kontrollera att Python ar installerat och finns i PATH.
 - Om inga mallar visas: kontrollera att `.md`-filer finns i `templates/`.
-- Om tooltips saknas: kontrollera `settings/tooltips.json` och att `enabled` ar `true`.
+- Om tooltips saknas: kontrollera `settings/tooltips.json` och att `enabled` är `true`.
