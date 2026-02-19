@@ -30,12 +30,21 @@ En enkel anteckningsapp i Python (Tkinter) med fokus på snabb textinmatning, ma
 2. Starta appen:
 
 ```powershell
+python -m notethis
+```
+
+Alternativt fungerar fortfarande:
+
+```powershell
 python NoteThis.py
 ```
 
 ## Struktur
 
-- `NoteThis.py`: huvudapp
+- `notethis/`: paket med appkod
+- `notethis/app.py`: huvudapp
+- `notethis/tokens.py`: token-hantering
+- `NoteThis.py`: wrapper för bakåtkompatibel start
 - `settings/tokens.json`: token-konfiguration
 - `settings/tooltips.json`: tooltips påknappar/fält
 - `settings/about_notethis.md`: texten i Om-rutan
