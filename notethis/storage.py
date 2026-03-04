@@ -63,3 +63,10 @@ def note_list_label(file_path: Path, max_chars: int = 60) -> str:
         preview = "(tom anteckning)"
 
     return f"{title} ({file_path.name}) - {preview}"
+
+
+def template_list_label(file_path: Path) -> str:
+    stem = file_path.stem
+    if "_" in stem:
+        return stem.split("_", 1)[1]
+    return stem

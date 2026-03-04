@@ -101,4 +101,50 @@ def apply_tokens(
         token_name = match.group(1)
         return token_values.get(token_name, match.group(0))
 
-    return re.sub(r"\[([A-Z0-9_]+)\]", replace_token, text)
+    resolved = re.sub(r"\[([A-Z0-9_]+)\]", replace_token, text)
+    resolved = replace_dynamic_variables(resolved)
+    return resolved
+
+
+def replace_dynamic_variables(text: str) -> str:
+    variables: dict[str, str] = {}
+    decl_pattern = re.compile(r"\[€\s*([^\s=\]]+)\s*=\s*(\"[^\"]*\"|'[^']*')\s*\]")
+
+    def _collect(match: re.Match) -> str:
+        key = match.group(1).strip()
+        raw_value = match.group(2)
+        value = raw_value[1:-1]
+        variables[key] = value
+        return ""
+
+    first_decl = decl_pattern.search(text)
+    decls_at_top = bool(first_decl and text[:first_decl.start()].strip() == "")
+    without_decls = decl_pattern.sub(_collect, text)
+    cleaned_lines = []
+    for line in without_decls.splitlines():
+        cleaned_lines.append(line.rstrip())
+
+    while cleaned_lines and cleaned_lines[0] == "":
+        cleaned_lines.pop(0)
+
+    if decls_at_top and variables and cleaned_lines:
+        cleaned_lines.insert(0, "")
+
+    remaining = "\n".join(cleaned_lines)
+
+    def replace_var(match: re.Match) -> str:
+        key = match.group(1)
+        index = match.group(2)
+        if key not in variables:
+            return match.group(0)
+        value = variables[key]
+        if index is None:
+            return value
+        parts = value.split()
+        idx = int(index)
+        if 0 <= idx < len(parts):
+            return parts[idx]
+        return ""
+
+    usage_pattern = re.compile(r"€([\wÅÄÖåäö]+)(?:\[(\d+)\])?", re.UNICODE)
+    return usage_pattern.sub(replace_var, remaining)

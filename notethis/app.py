@@ -1,33 +1,44 @@
 from pathlib import Path
 from datetime import datetime
+from dataclasses import dataclass
 import re
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import messagebox
+from tkinter import ttk
 
+from . import dialogs
+from . import editor_ops
 from . import exporting
+from . import lifecycle
 from . import settings_store
 from . import storage
 from . import tokens
-from .paths import (
-    ABOUT_MARKDOWN_PATH,
-    AUTOSAVE_INTERVAL_MINUTES,
-    AUTOSAVE_INTERVAL_MS,
-    FILE_PREFIX,
-    TOKENS_CONFIG_PATH,
-)
+from . import ui_tooltips
+from . import text_tools
+from .paths import AUTOSAVE_INTERVAL_MINUTES, AUTOSAVE_INTERVAL_MS, FILE_PREFIX, TOKENS_CONFIG_PATH
 
-current_note_file = None
-current_note_created_at = None
-last_saved_text = ""
-text_area = None
+@dataclass
+class DocumentState:
+    file_path: Path | None
+    created_at: datetime | None
+    last_saved_text: str
+    text_widget: tk.Text
+
+
+notebook = None
+doc_states: dict[str, DocumentState] = {}
+native_menubar = None
+menu_widgets: list[tk.Menu] = []
+custom_menubar = None
+
 document_label = None
 status_label = None
 stats_label = None
 search_entry = None
 divider_widget = None
-tooltip_objects = []
+tooltip_objects: list[ui_tooltips.ToolTip] = []
 base_status_message = ""
 search_status_message = ""
 UI_SCALE_FACTORS = (1, 1.5, 2)
@@ -78,76 +89,8 @@ THEMES = {
 }
 
 
-def tooltip_text(key: str, fallback: str) -> str:
-    config = settings_store.load_tooltips_config()
-    button_texts = config.get("buttons", {})
-    value = button_texts.get(key, fallback)
-    return str(value).strip()
-
-
-class ToolTip:
-    def __init__(self, widget: tk.Widget, text: str) -> None:
-        self.widget = widget
-        self.text = text
-        self.tip_window = None
-        self.after_id = None
-
-        self.widget.bind("<Enter>", self.on_enter, add="+")
-        self.widget.bind("<Leave>", self.on_leave, add="+")
-        self.widget.bind("<ButtonPress>", self.on_leave, add="+")
-
-    def on_enter(self, _event=None) -> None:
-        if self.after_id is None:
-            self.after_id = self.widget.after(500, self.show_tip)
-
-    def on_leave(self, _event=None) -> None:
-        if self.after_id is not None:
-            self.widget.after_cancel(self.after_id)
-            self.after_id = None
-        self.hide_tip()
-
-    def show_tip(self) -> None:
-        self.after_id = None
-        if self.tip_window is not None or not self.text:
-            return
-
-        x = self.widget.winfo_rootx() + 16
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-
-        self.tip_window = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-
-        label = tk.Label(
-            tw,
-            text=self.text,
-            justify="left",
-            relief="solid",
-            borderwidth=1,
-            background=current_theme()["tooltip_bg"],
-            fg=current_theme()["tooltip_fg"],
-            highlightbackground=current_theme()["tooltip_border"],
-            padx=6,
-            pady=3,
-        )
-        label.pack()
-
-    def hide_tip(self) -> None:
-        if self.tip_window is not None:
-            self.tip_window.destroy()
-            self.tip_window = None
-
-
 def attach_tooltip(widget: tk.Widget, key: str, fallback: str = "") -> None:
-    config = settings_store.load_tooltips_config()
-    if not config.get("enabled", True):
-        return
-
-    text = tooltip_text(key, fallback)
-    if not text:
-        return
-
-    tooltip_objects.append(ToolTip(widget, text))
+    ui_tooltips.attach_tooltip(widget, key, fallback, current_theme, tooltip_objects)
 
 
 def current_theme() -> dict[str, str]:
@@ -209,10 +152,130 @@ def style_widget_tree(widget: tk.Widget) -> None:
 
 def apply_theme(window: tk.Widget) -> None:
     style_widget_tree(window)
+    try:
+        style = ttk.Style()
+        style.theme_use("default")
+        theme = current_theme()
+        style.configure(
+            "NoteThis.TNotebook",
+            background=theme["surface_bg"],
+            borderwidth=0,
+        )
+        style.configure(
+            "NoteThis.TNotebook.Tab",
+            background=theme["button_bg"],
+            foreground=theme["fg"],
+            padding=(8, 4),
+        )
+        style.map(
+            "NoteThis.TNotebook.Tab",
+            background=[("selected", theme["text_bg"]), ("active", theme["button_active_bg"])],
+            foreground=[("selected", theme["text_fg"]), ("active", theme["fg"])],
+        )
+        if notebook is not None:
+            notebook.configure(style="NoteThis.TNotebook")
+    except tk.TclError:
+        pass
+    theme = current_theme()
+    for menu in menu_widgets:
+        try:
+            menu.config(
+                bg=theme["surface_bg"],
+                fg=theme["fg"],
+                activebackground=theme["button_active_bg"],
+                activeforeground=theme["fg"],
+                borderwidth=0,
+            )
+        except tk.TclError:
+            pass
+    if custom_menubar is not None:
+        try:
+            custom_menubar.config(bg=theme["surface_bg"])
+        except tk.TclError:
+            pass
     if divider_widget is not None:
         divider_widget.config(bg=current_theme()["divider"])
-    if text_area is not None:
-        text_area.tag_configure("search_match", background=current_theme()["search_match"])
+    for state in doc_states.values():
+        state.text_widget.tag_configure("search_match", background=current_theme()["search_match"])
+
+
+def current_tab_id() -> str:
+    if notebook is None:
+        return ""
+    return notebook.select()
+
+
+def current_state() -> DocumentState:
+    tab_id = current_tab_id()
+    if not tab_id or tab_id not in doc_states:
+        raise RuntimeError("Ingen aktiv flik.")
+    return doc_states[tab_id]
+
+
+def current_text_area() -> tk.Text:
+    return current_state().text_widget
+
+
+def update_tab_title(tab_id: str, state: DocumentState) -> None:
+    name = state.file_path.name if state.file_path is not None else "Nytt"
+    dirty_marker = " *" if editor_ops.is_dirty(state.text_widget, state.last_saved_text) else ""
+    notebook.tab(tab_id, text=f"{name}{dirty_marker}")
+
+
+def bind_editor_events(text_widget: tk.Text) -> None:
+    text_widget.bind("<KeyRelease>", lambda _event: refresh_editor_state())
+    text_widget.bind("<Return>", handle_return_key)
+    text_widget.bind("<Control-z>", undo_last_change)
+    text_widget.bind("<Control-Z>", undo_last_change)
+
+
+def create_tab(title: str = "Nytt", text: str = "") -> str:
+    frame = tk.Frame(notebook)
+    text_widget = tk.Text(frame, wrap="word", font="TkTextFont", undo=True, maxundo=10, autoseparators=True)
+    text_widget.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+    text_widget.insert("1.0", text)
+    text_widget.tag_configure("search_match", background=current_theme()["search_match"])
+    bind_editor_events(text_widget)
+
+    state = DocumentState(
+        file_path=None,
+        created_at=None,
+        last_saved_text="",
+        text_widget=text_widget,
+    )
+    notebook.add(frame, text=title)
+    tab_id = str(frame)
+    doc_states[tab_id] = state
+    notebook.select(tab_id)
+    text_widget.focus_set()
+    configure_heading_fonts()
+    apply_theme(frame)
+    return tab_id
+
+
+def close_current_tab() -> None:
+    if not doc_states:
+        return
+
+    tab_id = current_tab_id()
+    state = doc_states[tab_id]
+    if editor_ops.is_dirty(state.text_widget, state.last_saved_text):
+        choice = messagebox.askyesnocancel(
+            "Spara ändringar",
+            "Du har osparade ändringar i fliken. Vill du spara innan du stänger?",
+        )
+        if choice is None:
+            return
+        if choice:
+            if not save_note(state=state):
+                return
+
+    notebook.forget(tab_id)
+    doc_states.pop(tab_id, None)
+
+    if not doc_states:
+        create_tab()
+    refresh_editor_state()
 
 def get_system_theme_name() -> str:
     if sys.platform.startswith("win"):
@@ -241,76 +304,8 @@ def apply_theme_mode(window: tk.Widget) -> None:
     apply_theme(window)
 
 
-def insert_markdown_with_bold(text_widget: tk.Text, line: str, line_tag: str | None = None) -> None:
-    cursor = 0
-    for match in re.finditer(r"\*\*(.+?)\*\*", line):
-        if match.start() > cursor:
-            text_widget.insert(tk.END, line[cursor:match.start()], line_tag)
-        text_widget.insert(tk.END, match.group(1), ("about_bold", line_tag) if line_tag else "about_bold")
-        cursor = match.end()
-
-    if cursor < len(line):
-        text_widget.insert(tk.END, line[cursor:], line_tag)
-
-
-def render_about_markdown(text_widget: tk.Text, markdown_text: str) -> None:
-    text_widget.delete("1.0", tk.END)
-
-    for raw_line in markdown_text.splitlines():
-        heading_match = re.match(r"^(#{1,4})\s+(.*)$", raw_line)
-        if heading_match:
-            level = len(heading_match.group(1))
-            line_text = heading_match.group(2).strip()
-            insert_markdown_with_bold(text_widget, line_text, f"about_h{level}")
-            text_widget.insert(tk.END, "\n")
-            continue
-
-        insert_markdown_with_bold(text_widget, raw_line, "about_body")
-        text_widget.insert(tk.END, "\n")
-
-    text_widget.config(state="disabled")
-
-
 def open_about_dialog(window: tk.Tk) -> None:
-    dialog = tk.Toplevel(window)
-    dialog.title("Om NoteThis")
-    dialog.geometry("700x520")
-    dialog.transient(window)
-
-    content_frame = tk.Frame(dialog)
-    content_frame.pack(fill="both", expand=True, padx=12, pady=12)
-
-    scrollbar = tk.Scrollbar(content_frame)
-    scrollbar.pack(side="right", fill="y")
-
-    text_widget = tk.Text(content_frame, wrap="word", yscrollcommand=scrollbar.set, font="TkTextFont")
-    text_widget.pack(side="left", fill="both", expand=True)
-    scrollbar.config(command=text_widget.yview)
-
-    base_font = tkfont.nametofont("TkTextFont")
-    family = base_font.cget("family")
-    size = int(base_font.cget("size"))
-
-    heading_size_map = {1: max(size + 6, 14), 2: max(size + 4, 13), 3: max(size + 2, 12), 4: max(size + 1, 11)}
-    for level in (1, 2, 3, 4):
-        tag_name = f"about_h{level}"
-        heading_font = tkfont.Font(family=family, size=heading_size_map[level], weight="bold")
-        text_widget.tag_configure(tag_name, font=heading_font, spacing1=8, spacing3=4)
-
-    text_widget.tag_configure("about_body", spacing1=2, spacing3=4)
-    text_widget.tag_configure("about_bold", font=tkfont.Font(family=family, size=size, weight="bold"))
-
-    try:
-        markdown_text = ABOUT_MARKDOWN_PATH.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        markdown_text = "# NoteThis\n\nKunde inte läsa infofilen i settings."
-
-    render_about_markdown(text_widget, markdown_text)
-
-    close_button = tk.Button(dialog, text="Stäng", command=dialog.destroy, width=10)
-    close_button.pack(pady=(0, 12))
-    attach_tooltip(close_button, "about.close", "Stäng informationsfönstret.")
-    apply_theme(dialog)
+    dialogs.open_about_dialog(window, apply_theme, attach_tooltip)
 
 
 def set_theme_mode(window: tk.Widget, mode: str) -> None:
@@ -327,24 +322,21 @@ def set_theme_mode(window: tk.Widget, mode: str) -> None:
         set_status(f"Tema: {'Mörkt' if theme_mode == 'dark' else 'Ljust'}")
 
 
-def editor_text() -> str:
-    return text_area.get("1.0", tk.END).rstrip()
-
-
 def is_dirty() -> bool:
-    return editor_text() != last_saved_text
+    state = current_state()
+    return editor_ops.is_dirty(state.text_widget, state.last_saved_text)
 
 
 def update_document_label() -> None:
-    name = current_note_file.name if current_note_file is not None else "Nytt"
-    dirty_marker = " *" if is_dirty() else ""
+    state = current_state()
+    name = state.file_path.name if state.file_path is not None else "Nytt"
+    dirty_marker = " *" if editor_ops.is_dirty(state.text_widget, state.last_saved_text) else ""
     document_label.config(text=f"Dokument: {name}{dirty_marker}")
+    update_tab_title(current_tab_id(), state)
 
 
 def update_document_stats() -> None:
-    raw_text = text_area.get("1.0", "end-1c")
-    words = len(raw_text.split())
-    characters = len(raw_text)
+    words, characters = editor_ops.update_document_stats(current_text_area())
     stats_label.config(text=f"Ord: {words}  Tecken: {characters}")
 
 
@@ -400,32 +392,15 @@ def configure_heading_fonts() -> None:
         else:
             heading_fonts[font_key].configure(family=family, size=size, weight="bold")
 
-    if text_area is not None:
-        text_area.tag_configure("md_h1", font=heading_fonts["h1"])
-        text_area.tag_configure("md_h2", font=heading_fonts["h2"])
-        text_area.tag_configure("md_h3", font=heading_fonts["h3"])
-        text_area.tag_configure("md_h4", font=heading_fonts["h4"])
+    for state in doc_states.values():
+        state.text_widget.tag_configure("md_h1", font=heading_fonts["h1"])
+        state.text_widget.tag_configure("md_h2", font=heading_fonts["h2"])
+        state.text_widget.tag_configure("md_h3", font=heading_fonts["h3"])
+        state.text_widget.tag_configure("md_h4", font=heading_fonts["h4"])
 
 
 def apply_markdown_heading_styles() -> None:
-    if text_area is None:
-        return
-
-    for tag_name in ("md_h1", "md_h2", "md_h3", "md_h4"):
-        text_area.tag_remove(tag_name, "1.0", tk.END)
-
-    end_line = int(text_area.index("end-1c").split(".")[0])
-    for line_number in range(1, end_line + 1):
-        line_start = f"{line_number}.0"
-        line_end = f"{line_number}.end"
-        line_text = text_area.get(line_start, line_end)
-
-        match = re.match(r"^(#{1,4})\s+", line_text)
-        if not match:
-            continue
-
-        level = len(match.group(1))
-        text_area.tag_add(f"md_h{level}", line_start, line_end)
+    editor_ops.apply_markdown_heading_styles(current_text_area())
 
 
 def render_status_line() -> None:
@@ -438,26 +413,10 @@ def render_status_line() -> None:
 def update_search_matches() -> int:
     global search_status_message
 
-    text_area.tag_remove("search_match", "1.0", tk.END)
     query = search_entry.get().strip()
-    if not query:
-        search_status_message = ""
-        return 0
-
-    start_index = "1.0"
-    matches = 0
-    while True:
-        match_index = text_area.search(query, start_index, stopindex=tk.END, nocase=True)
-        if not match_index:
-            break
-
-        match_end = f"{match_index}+{len(query)}c"
-        text_area.tag_add("search_match", match_index, match_end)
-        start_index = match_end
-        matches += 1
-
+    matches = editor_ops.update_search_matches(current_text_area(), query, tag="search_match")
     if matches == 0:
-        search_status_message = "Sök: 0 träffar (tips: kontrollera stavning)"
+        search_status_message = "" if not query else "Sök: 0 träffar (tips: kontrollera stavning)"
     elif matches == 1:
         search_status_message = "Sök: 1 träff"
     else:
@@ -467,11 +426,20 @@ def update_search_matches() -> int:
 
 
 def refresh_editor_state() -> None:
+    if notebook is None or not doc_states:
+        if status_label is not None:
+            status_label.config(text=base_status_message)
+        return
     apply_markdown_heading_styles()
     update_document_label()
     update_document_stats()
     update_search_matches()
     render_status_line()
+
+
+def handle_tab_changed(_event=None) -> None:
+    refresh_editor_state()
+    current_text_area().focus_set()
 
 
 def set_status(message: str) -> None:
@@ -482,56 +450,58 @@ def set_status(message: str) -> None:
 
 def undo_last_change(_event=None) -> str:
     try:
-        text_area.edit_undo()
+        widget = _event.widget if _event is not None else current_text_area()
+        widget.edit_undo()
         refresh_editor_state()
     except tk.TclError:
         set_status("Inget att ångra")
     return "break"
 
 
-def save_note(show_empty_warning: bool = True, autosave: bool = False) -> bool:
-    global current_note_file, current_note_created_at, last_saved_text
+def save_note(show_empty_warning: bool = True, autosave: bool = False, state: DocumentState | None = None) -> bool:
+    if state is None:
+        state = current_state()
 
-    text = editor_text()
+    text = editor_ops.editor_text(state.text_widget)
     if not text:
         if show_empty_warning:
             messagebox.showwarning("Tom anteckning", "Skriv något innan du sparar.")
         return False
 
-    if current_note_created_at is None:
-        current_note_created_at = datetime.now()
+    if state.created_at is None:
+        state.created_at = datetime.now()
 
-    if current_note_file is None:
-        current_note_file = storage.next_note_file()
+    if state.file_path is None:
+        state.file_path = storage.next_note_file()
 
     resolved_text = tokens.apply_tokens(
         text=text,
         config_path=TOKENS_CONFIG_PATH,
-        file_path=current_note_file,
-        created_at=current_note_created_at,
+        file_path=state.file_path,
+        created_at=state.created_at,
         updated_at=datetime.now(),
         file_prefix=FILE_PREFIX,
     )
 
-    if resolved_text == last_saved_text:
+    if resolved_text == state.last_saved_text:
         return False
 
-    storage.write_note_file(current_note_file, resolved_text, create_backup=autosave)
-    last_saved_text = resolved_text
+    storage.write_note_file(state.file_path, resolved_text, create_backup=autosave)
+    state.last_saved_text = resolved_text
 
     if resolved_text != text:
-        text_area.delete("1.0", tk.END)
-        text_area.insert("1.0", resolved_text)
+        state.text_widget.delete("1.0", tk.END)
+        state.text_widget.insert("1.0", resolved_text)
 
     status = "Autosparad" if autosave else "Sparad"
-    set_status(f"{status}: {current_note_file.name}")
+    set_status(f"{status}: {state.file_path.name}")
     return True
 
 
 def save_note_as_copy() -> bool:
-    global current_note_file, current_note_created_at, last_saved_text
+    state = current_state()
 
-    text = editor_text()
+    text = editor_ops.editor_text(state.text_widget)
     if not text:
         messagebox.showwarning("Tom anteckning", "Skriv något innan du sparar.")
         return False
@@ -548,59 +518,80 @@ def save_note_as_copy() -> bool:
     )
 
     new_file_path.write_text(resolved_text + "\n", encoding="utf-8")
-    current_note_file = new_file_path
-    current_note_created_at = new_created_at
-    last_saved_text = resolved_text
+    state.file_path = new_file_path
+    state.created_at = new_created_at
+    state.last_saved_text = resolved_text
 
     if resolved_text != text:
-        text_area.delete("1.0", tk.END)
-        text_area.insert("1.0", resolved_text)
+        state.text_widget.delete("1.0", tk.END)
+        state.text_widget.insert("1.0", resolved_text)
 
-    set_status(f"Sparad som: {current_note_file.name}")
-    text_area.focus_set()
+    set_status(f"Sparad som: {state.file_path.name}")
+    state.text_widget.focus_set()
     return True
 
 
-def open_note_file(file_path: Path) -> None:
-    global current_note_file, current_note_created_at, last_saved_text
+def open_note_file(file_path: Path, state: DocumentState | None = None) -> None:
+    if state is None:
+        state = current_state()
 
     text = file_path.read_text(encoding="utf-8")
-    text_area.delete("1.0", tk.END)
-    text_area.insert("1.0", text.rstrip("\n"))
+    state.text_widget.delete("1.0", tk.END)
+    state.text_widget.insert("1.0", text.rstrip("\n"))
 
-    current_note_file = file_path
+    state.file_path = file_path
     try:
-        current_note_created_at = datetime.fromtimestamp(file_path.stat().st_ctime)
+        state.created_at = datetime.fromtimestamp(file_path.stat().st_ctime)
     except OSError:
-        current_note_created_at = datetime.now()
-    last_saved_text = editor_text()
+        state.created_at = datetime.now()
+    state.last_saved_text = editor_ops.editor_text(state.text_widget)
     set_status(f"Öppnad: {file_path.name}")
-    text_area.focus_set()
+    state.text_widget.focus_set()
 
 
 def insert_timestamp() -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    text_area.insert(tk.INSERT, timestamp)
+    current_text_area().insert(tk.INSERT, timestamp)
     refresh_editor_state()
-    text_area.focus_set()
+    current_text_area().focus_set()
 
 
 def insert_token_placeholder(token_name: str) -> None:
     placeholder = f"[{token_name}]"
-    text_area.insert(tk.INSERT, placeholder)
+    current_text_area().insert(tk.INSERT, placeholder)
     refresh_editor_state()
-    text_area.focus_set()
+    current_text_area().focus_set()
+
+
+def insert_participant_list() -> None:
+    try:
+        selected_text = current_text_area().get("sel.first", "sel.last")
+    except tk.TclError:
+        messagebox.showinfo("Ingen markering", "Markera text som ska göras om till en deltagarlista.")
+        return
+
+    names = text_tools.parse_participant_list(selected_text)
+    if not names:
+        messagebox.showinfo("Inga namn hittades", "Kunde inte hitta några namn i markeringen.")
+        return
+
+    result = "\n".join(f"- {name}" for name in names)
+    current_text_area().delete("sel.first", "sel.last")
+    current_text_area().insert(tk.INSERT, result)
+    refresh_editor_state()
+    current_text_area().focus_set()
 
 
 def handle_return_key(_event) -> str | None:
-    line_start = text_area.index("insert linestart")
-    line_end = text_area.index("insert lineend")
-    line_text = text_area.get(line_start, line_end)
+    widget = _event.widget if _event is not None else current_text_area()
+    line_start = widget.index("insert linestart")
+    line_end = widget.index("insert lineend")
+    line_text = widget.get(line_start, line_end)
 
     checkbox_match = re.match(r"^(\s*)-\s+\[(?: |x|X)\]\s+", line_text)
     if checkbox_match:
         prefix = f"\n{checkbox_match.group(1)}- [ ] "
-        text_area.insert(tk.INSERT, prefix)
+        widget.insert(tk.INSERT, prefix)
         refresh_editor_state()
         return "break"
 
@@ -608,282 +599,92 @@ def handle_return_key(_event) -> str | None:
     if numbered_match:
         next_number = int(numbered_match.group(2)) + 1
         prefix = f"\n{numbered_match.group(1)}{next_number}. "
-        text_area.insert(tk.INSERT, prefix)
+        widget.insert(tk.INSERT, prefix)
         refresh_editor_state()
         return "break"
 
     bullet_match = re.match(r"^(\s*)-\s+", line_text)
     if bullet_match:
         prefix = f"\n{bullet_match.group(1)}- "
-        text_area.insert(tk.INSERT, prefix)
+        widget.insert(tk.INSERT, prefix)
         refresh_editor_state()
         return "break"
 
     return None
 
 
-def template_list_label(file_path: Path) -> str:
-    stem = file_path.stem
-    if "_" in stem:
-        return stem.split("_", 1)[1]
-    return stem
-
-
-def create_note_from_template(template_path: Path) -> None:
-    global current_note_file, current_note_created_at, last_saved_text
+def create_note_from_template(template_path: Path, state: DocumentState | None = None) -> None:
+    if state is None:
+        state = current_state()
 
     template_text = template_path.read_text(encoding="utf-8")
-    text_area.delete("1.0", tk.END)
-    text_area.insert("1.0", template_text.rstrip("\n"))
-    current_note_file = None
-    current_note_created_at = None
-    last_saved_text = ""
+    state.text_widget.delete("1.0", tk.END)
+    state.text_widget.insert("1.0", template_text.rstrip("\n"))
+    state.file_path = None
+    state.created_at = None
+    state.last_saved_text = ""
     set_status(f"Ny från mall: {template_path.name}")
-    text_area.focus_set()
-
-
-def open_template_dialog(window: tk.Tk) -> None:
-    template_files = storage.list_template_files()
-    if not template_files:
-        messagebox.showinfo("Inga mallar", "Hittade inga mallar i mappen templates.")
-        return
-
-    dialog = tk.Toplevel(window)
-    dialog.title("Välj mall")
-    dialog.geometry("420x340")
-    dialog.transient(window)
-    dialog.grab_set()
-
-    list_frame = tk.Frame(dialog)
-    list_frame.pack(fill="both", expand=True, padx=12, pady=(12, 8))
-
-    scrollbar = tk.Scrollbar(list_frame)
-    scrollbar.pack(side="right", fill="y")
-
-    listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
-    listbox.pack(side="left", fill="both", expand=True)
-    scrollbar.config(command=listbox.yview)
-
-    for file_path in template_files:
-        listbox.insert(tk.END, template_list_label(file_path))
-
-    buttons = tk.Frame(dialog)
-    buttons.pack(fill="x", padx=12, pady=(0, 12))
-
-    def selected_template() -> Path | None:
-        selection = listbox.curselection()
-        if not selection:
-            messagebox.showinfo("Ingen vald", "Välj en mall i listan.", parent=dialog)
-            return None
-
-        idx = selection[0]
-        if idx >= len(template_files):
-            return None
-        return template_files[idx]
-
-    def create_selected() -> None:
-        file_path = selected_template()
-        if file_path is None:
-            return
-        create_note_from_template(file_path)
-        dialog.destroy()
-
-    create_button = tk.Button(buttons, text="Skapa", command=create_selected, width=10)
-    create_button.pack(side="left")
-    attach_tooltip(create_button, "template.create", "Temporär tooltip: Skapa anteckning från vald mall.")
-
-    close_button = tk.Button(buttons, text="Stäng", command=dialog.destroy, width=10)
-    close_button.pack(side="right")
-    attach_tooltip(close_button, "template.close", "Temporär tooltip: Stäng mallfönstret utan att skapa.")
-
-    listbox.bind("<Double-Button-1>", lambda _event: create_selected())
-    apply_theme(dialog)
+    state.text_widget.focus_set()
 
 
 def start_new_note_from_template(window: tk.Tk) -> None:
     if is_dirty():
         save_note(show_empty_warning=False, autosave=True)
-    open_template_dialog(window)
+
+    def create_in_new_tab(template_path: Path) -> None:
+        tab_id = create_tab()
+        state = doc_states[tab_id]
+        create_note_from_template(template_path, state)
+
+    dialogs.open_template_dialog(window, create_in_new_tab, apply_theme, attach_tooltip)
 
 
 def open_notes_dialog(window: tk.Tk) -> None:
-    dialog = tk.Toplevel(window)
-    dialog.title("Öppna / Radera anteckning")
-    dialog.geometry("420x340")
-    dialog.transient(window)
-    dialog.grab_set()
-
-    control_bar = tk.Frame(dialog)
-    control_bar.pack(fill="x", padx=12, pady=(12, 4))
-
-    filter_var = tk.StringVar()
-    filter_entry = tk.Entry(control_bar, textvariable=filter_var)
-    filter_entry.pack(side="left", fill="x", expand=True)
-    attach_tooltip(filter_entry, "notes.filter", "Filtrera anteckningar efter titel eller text.")
-
-    sort_var = tk.StringVar(value="Senast ändrad")
-    sort_menu = tk.OptionMenu(control_bar, sort_var, "Senast ändrad", "Skapad", "Titel", "Filnamn")
-    sort_menu.pack(side="right", padx=(8, 0))
-
-    list_frame = tk.Frame(dialog)
-    list_frame.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-
-    scrollbar = tk.Scrollbar(list_frame)
-    scrollbar.pack(side="right", fill="y")
-
-    listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
-    listbox.pack(side="left", fill="both", expand=True)
-    scrollbar.config(command=listbox.yview)
-
-    buttons = tk.Frame(dialog)
-    buttons.pack(fill="x", padx=12, pady=(0, 12))
-
-    note_files: list[Path] = []
-
-    def build_note_meta(file_path: Path) -> dict[str, object]:
-        text = file_path.read_text(encoding="utf-8").strip()
-        title = storage.extract_note_title(text) or file_path.stem
-        compact_text = " ".join(text.split())
-        preview = compact_text[:60].rstrip() + "..." if len(compact_text) > 60 else compact_text
-        if not preview:
-            preview = "(tom anteckning)"
-        label = f"{title} ({file_path.name}) - {preview}"
-        try:
-            created = file_path.stat().st_ctime
-            updated = file_path.stat().st_mtime
-        except OSError:
-            created = 0
-            updated = 0
-        return {
-            "path": file_path,
-            "title": title.lower(),
-            "name": file_path.name.lower(),
-            "preview": preview.lower(),
-            "created": created,
-            "updated": updated,
-            "label": label,
-        }
-
-    def refresh_list() -> None:
-        nonlocal note_files
-        note_files = storage.list_note_files()
-        listbox.delete(0, tk.END)
-        query = filter_var.get().strip().lower()
-        metas = [build_note_meta(file_path) for file_path in note_files]
-        if query:
-            metas = [
-                meta
-                for meta in metas
-                if query in meta["title"] or query in meta["name"] or query in meta["preview"]
-            ]
-
-        sort_key = sort_var.get()
-        if sort_key == "Skapad":
-            metas.sort(key=lambda meta: meta["created"], reverse=True)
-        elif sort_key == "Titel":
-            metas.sort(key=lambda meta: meta["title"])
-        elif sort_key == "Filnamn":
-            metas.sort(key=lambda meta: meta["name"])
-        else:
-            metas.sort(key=lambda meta: meta["updated"], reverse=True)
-
-        note_files = [meta["path"] for meta in metas]
-        for meta in metas:
-            listbox.insert(tk.END, meta["label"])
-
-    def selected_file() -> Path | None:
-        selection = listbox.curselection()
-        if not selection:
-            messagebox.showinfo("Ingen vald", "Välj en anteckning i listan.", parent=dialog)
-            return None
-
-        idx = selection[0]
-        if idx >= len(note_files):
-            return None
-        return note_files[idx]
-
-    def open_selected() -> None:
-        file_path = selected_file()
-        if file_path is None:
-            return
-        open_note_file(file_path)
-        dialog.destroy()
-
-    def delete_selected() -> None:
-        global current_note_file, current_note_created_at, last_saved_text
-
-        file_path = selected_file()
-        if file_path is None:
-            return
-
-        confirmed = messagebox.askyesno(
-            "Radera anteckning",
-            f"Vill du radera {file_path.name}?",
-            parent=dialog,
-        )
-        if not confirmed:
-            return
+    def handle_delete(file_path: Path) -> None:
+        for tab_id, state in list(doc_states.items()):
+            if state.file_path == file_path:
+                notebook.forget(tab_id)
+                doc_states.pop(tab_id, None)
 
         file_path.unlink(missing_ok=True)
 
-        if current_note_file == file_path:
-            current_note_file = None
-            current_note_created_at = None
-            last_saved_text = ""
-            text_area.delete("1.0", tk.END)
-            set_status("Raderade öppen anteckning")
+        if not doc_states:
+            create_tab()
+        set_status("Raderade anteckning")
 
-        refresh_list()
+    def handle_open(file_path: Path) -> None:
+        tab_id = create_tab()
+        state = doc_states[tab_id]
+        open_note_file(file_path, state)
 
-    open_button = tk.Button(buttons, text="Öppna", command=open_selected, width=10)
-    open_button.pack(side="left")
-    attach_tooltip(open_button, "notes.open", "Temporär tooltip: Öppna vald anteckning.")
-
-    delete_button = tk.Button(buttons, text="Radera", command=delete_selected, width=10)
-    delete_button.pack(side="left", padx=(8, 0))
-    attach_tooltip(delete_button, "notes.delete", "Temporär tooltip: Radera vald anteckning permanent.")
-
-    close_button = tk.Button(buttons, text="Stäng", command=dialog.destroy, width=10)
-    close_button.pack(side="right")
-    attach_tooltip(close_button, "notes.close", "Temporär tooltip: Stäng anteckningslistan.")
-
-    listbox.bind("<Double-Button-1>", lambda _event: open_selected())
-
-    refresh_list()
-    filter_entry.bind("<KeyRelease>", lambda _event: refresh_list())
-    sort_var.trace_add("write", lambda *_args: refresh_list())
-    apply_theme(dialog)
+    dialogs.open_notes_dialog(window, handle_open, handle_delete, apply_theme, attach_tooltip)
 
 
 def schedule_autosave(window: tk.Tk) -> None:
-    save_note(show_empty_warning=False, autosave=True)
-    window.after(AUTOSAVE_INTERVAL_MS, lambda: schedule_autosave(window))
+    def autosave_all() -> None:
+        for state in doc_states.values():
+            save_note(show_empty_warning=False, autosave=True, state=state)
+
+    lifecycle.schedule_autosave(window, AUTOSAVE_INTERVAL_MS, autosave_all)
 
 
-def handle_save_shortcut(_event=None) -> str:
-    save_note()
-    return "break"
+def handle_save_shortcut():
+    return lifecycle.handle_save_shortcut(save_note)
 
 
 def confirm_close(window: tk.Tk) -> None:
-    if not is_dirty():
-        window.destroy()
-        return
+    def any_dirty() -> bool:
+        return any(editor_ops.is_dirty(state.text_widget, state.last_saved_text) for state in doc_states.values())
 
-    choice = messagebox.askyesnocancel(
-        "Spara ändringar",
-        "Du har osparade ändringar. Vill du spara innan du stänger?",
-        parent=window,
-    )
-    if choice is None:
-        return
-    if choice:
-        if save_note():
-            window.destroy()
-        else:
-            return
-    else:
-        window.destroy()
+    def save_all() -> bool:
+        success = True
+        for state in doc_states.values():
+            if editor_ops.is_dirty(state.text_widget, state.last_saved_text):
+                if not save_note(state=state):
+                    success = False
+        return success
+
+    lifecycle.confirm_close(window, any_dirty, save_all)
 
 
 def main() -> None:
@@ -891,7 +692,8 @@ def main() -> None:
     window.title("NoteThis")
     window.geometry("700x450")
 
-    global text_area, document_label, status_label, stats_label, search_entry, divider_widget
+    global notebook, document_label, status_label, stats_label, search_entry, divider_widget
+    global native_menubar, menu_widgets, custom_menubar
     global theme_mode, ui_scale_index
     user_settings.update(settings_store.load_user_settings())
     theme_mode = str(user_settings.get("theme_mode", "light")).lower()
@@ -911,44 +713,54 @@ def main() -> None:
 
     menubar = tk.Menu(window)
     window.config(menu=menubar)
+    native_menubar = menubar
+    menu_widgets = [menubar]
 
     file_menu = tk.Menu(menubar, tearoff=0)
+    menu_widgets.append(file_menu)
     menubar.add_cascade(label="Arkiv", menu=file_menu)
+    file_menu.add_command(label="Ny flik", command=lambda: create_tab())
+    file_menu.add_command(label="Stäng flik", command=close_current_tab)
     file_menu.add_command(label="Ny anteckning", command=lambda: start_new_note_from_template(window))
     file_menu.add_command(label="Hantera anteckningar", command=lambda: open_notes_dialog(window))
     file_menu.add_separator()
     file_menu.add_command(label="Spara", command=save_note, accelerator="Ctrl+S")
     file_menu.add_command(label="Spara som..", command=save_note_as_copy)
     export_menu = tk.Menu(file_menu, tearoff=0)
+    menu_widgets.append(export_menu)
     export_menu.add_command(
         label="Markdown (.md)",
-        command=lambda: exporting.export_note(text_area.get("1.0", "end-1c"), set_status, "md"),
+        command=lambda: exporting.export_note(current_text_area().get("1.0", "end-1c"), set_status, "md"),
     )
     export_menu.add_command(
         label="Text (.txt)",
-        command=lambda: exporting.export_note(text_area.get("1.0", "end-1c"), set_status, "txt"),
+        command=lambda: exporting.export_note(current_text_area().get("1.0", "end-1c"), set_status, "txt"),
     )
     export_menu.add_command(
         label="PDF (.pdf)",
-        command=lambda: exporting.export_note(text_area.get("1.0", "end-1c"), set_status, "pdf"),
+        command=lambda: exporting.export_note(current_text_area().get("1.0", "end-1c"), set_status, "pdf"),
     )
     file_menu.add_cascade(label="Exportera", menu=export_menu)
     file_menu.add_separator()
     file_menu.add_command(label="Avsluta", command=lambda: confirm_close(window))
 
     edit_menu = tk.Menu(menubar, tearoff=0)
+    menu_widgets.append(edit_menu)
     menubar.add_cascade(label="Redigera", menu=edit_menu)
     edit_menu.add_command(label="Ångra", command=undo_last_change, accelerator="Ctrl+Z")
 
     insert_menu = tk.Menu(menubar, tearoff=0)
+    menu_widgets.append(insert_menu)
     menubar.add_cascade(label="Infoga", menu=insert_menu)
     insert_menu.add_command(label="Tidsstämpel", command=insert_timestamp)
+    insert_menu.add_command(label="Deltagarlista", command=insert_participant_list)
     insert_menu.add_separator()
 
     token_config_local = tokens.load_token_config(TOKENS_CONFIG_PATH)
     globals_config = token_config_local.get("globals", {})
     if isinstance(globals_config, dict) and globals_config:
         globals_menu = tk.Menu(insert_menu, tearoff=0)
+        menu_widgets.append(globals_menu)
         for token_name in sorted(globals_config.keys()):
             globals_menu.add_command(
                 label=token_name,
@@ -962,6 +774,7 @@ def main() -> None:
             if not isinstance(token_group, dict) or not token_group:
                 continue
             group_menu = tk.Menu(insert_menu, tearoff=0)
+            menu_widgets.append(group_menu)
             for token_name in sorted(token_group.keys()):
                 group_menu.add_command(
                     label=token_name,
@@ -970,9 +783,11 @@ def main() -> None:
             insert_menu.add_cascade(label=group_name.title(), menu=group_menu)
 
     settings_menu = tk.Menu(menubar, tearoff=0)
+    menu_widgets.append(settings_menu)
     menubar.add_cascade(label="Inställningar", menu=settings_menu)
 
     theme_menu = tk.Menu(settings_menu, tearoff=0)
+    menu_widgets.append(theme_menu)
     settings_menu.add_cascade(label="Tema", menu=theme_menu)
     theme_var = tk.StringVar(value=theme_mode if theme_mode in {"light", "dark", "system"} else "light")
     theme_menu.add_radiobutton(
@@ -995,6 +810,7 @@ def main() -> None:
     )
 
     zoom_menu = tk.Menu(settings_menu, tearoff=0)
+    menu_widgets.append(zoom_menu)
     settings_menu.add_cascade(label="Zoom", menu=zoom_menu)
     zoom_var = tk.IntVar(value=ui_scale_index)
     zoom_menu.add_radiobutton(
@@ -1017,8 +833,23 @@ def main() -> None:
     )
 
     help_menu = tk.Menu(menubar, tearoff=0)
+    menu_widgets.append(help_menu)
     menubar.add_cascade(label="Hjälp", menu=help_menu)
     help_menu.add_command(label="Om NoteThis", command=lambda: open_about_dialog(window))
+
+    custom_menubar = tk.Frame(window)
+    custom_menubar.pack(fill="x", padx=8, pady=(8, 0))
+    menu_buttons = [
+        ("Arkiv", file_menu),
+        ("Redigera", edit_menu),
+        ("Infoga", insert_menu),
+        ("Inställningar", settings_menu),
+        ("Hjälp", help_menu),
+    ]
+    for label, menu in menu_buttons:
+        btn = tk.Menubutton(custom_menubar, text=label, menu=menu, relief="flat")
+        btn.pack(side="left", padx=(0, 6))
+        attach_tooltip(btn, f"menu.{label.lower()}", f"Öppna menyn {label}.")
 
     controls = tk.Frame(window)
     controls.pack(fill="x", padx=12, pady=(12, 8))
@@ -1066,19 +897,17 @@ def main() -> None:
     stats_label = tk.Label(info_bar, text="Ord: 0  Tecken: 0", anchor="e")
     stats_label.pack(side="right")
 
-    text_area = tk.Text(window, wrap="word", font="TkTextFont", undo=True, maxundo=10, autoseparators=True)
-    text_area.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-    text_area.tag_configure("search_match", background=current_theme()["search_match"])
+    notebook = ttk.Notebook(window)
+    notebook.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+    create_tab()
+
     configure_heading_fonts()
-    text_area.bind("<KeyRelease>", lambda _event: refresh_editor_state())
-    text_area.bind("<Return>", handle_return_key)
-    text_area.bind("<Control-z>", undo_last_change)
-    text_area.bind("<Control-Z>", undo_last_change)
-    text_area.bind("<Control-s>", handle_save_shortcut)
-    text_area.bind("<Control-S>", handle_save_shortcut)
-    window.bind("<Control-s>", handle_save_shortcut)
-    window.bind("<Control-S>", handle_save_shortcut)
+
+    save_shortcut = handle_save_shortcut()
+    window.bind("<Control-s>", save_shortcut)
+    window.bind("<Control-S>", save_shortcut)
     search_entry.bind("<KeyRelease>", lambda _event: refresh_editor_state())
+    notebook.bind("<<NotebookTabChanged>>", handle_tab_changed)
     apply_theme_mode(window)
     set_ui_scale(ui_scale_index)
     set_status(f"Autosparning: var {AUTOSAVE_INTERVAL_MINUTES} min")

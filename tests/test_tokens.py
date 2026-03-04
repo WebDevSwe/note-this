@@ -61,3 +61,18 @@ def test_apply_tokens_keeps_unknown_tokens(tmp_path: Path) -> None:
 def test_format_with_fallback_supports_day_without_zero() -> None:
     value = datetime(2026, 2, 3, 8, 5)
     assert tokens.format_with_fallback(value, "%-d %b %Y") == "3 Feb 2026"
+
+
+def test_replace_dynamic_variables() -> None:
+    text = "[€namn=\"Sven Gran\"]\n[€företag=\"Grans skog\"]\n\nHej €namn,"
+    assert tokens.replace_dynamic_variables(text) == "\nHej Sven Gran,"
+
+
+def test_replace_dynamic_variables_with_index() -> None:
+    text = "[€avsändare=\"Tobias Wiklund\"]\nMvh/ €avsändare[0]"
+    assert tokens.replace_dynamic_variables(text) == "\nMvh/ Tobias"
+
+
+def test_replace_dynamic_variables_multiple_on_line_and_late_decl() -> None:
+    text = "Intro\n[€namn=\"Sven Gran\"] [€företag=\"Grans skog\"]\nHej €namn, på €företag."
+    assert tokens.replace_dynamic_variables(text) == "Intro\n\nHej Sven Gran, på Grans skog."
